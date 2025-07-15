@@ -4,7 +4,7 @@ from timm.models.layers import Mlp
 from timm.layers import DropPath
 
 from diffusion_planner.model.module.mixer import MixerBlock
-
+from diffusion_planner.model.module.custom_multihead_attention import CustomMultiheadAttention
 
 class Encoder(nn.Module):
     def __init__(self, config):
@@ -29,6 +29,7 @@ class Encoder(nn.Module):
         # position embedding encode x, y, cos, sin, type
         self.pos_emb = nn.Linear(7, config.hidden_dim)
 
+    
     def forward(self, inputs):
 
         encoder_outputs = {}
@@ -63,14 +64,16 @@ class Encoder(nn.Module):
         encoder_outputs['encoding'] = self.fusion(encoding_input, encoding_mask.view(B, self.token_num))
 
         return encoder_outputs
-
+    
+    
 
 class SelfAttentionBlock(nn.Module):
     def __init__(self, dim=192, heads=6, dropout=0.1, mlp_ratio=4.0):
         super().__init__()
 
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
+        self.attn = CustomMultiheadAttention(dim, heads, dropout, batch_first=True) # <-- 修改后的代码
+        # self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
 
         self.drop_path = DropPath(dropout) if dropout > 0.0 else nn.Identity()
         self.norm2 = nn.LayerNorm(dim)
@@ -208,7 +211,8 @@ class LaneFusionEncoder(nn.Module):
         x = x[..., :8]
 
         pos = x[:, :, int(self._lane_len / 2), :7].clone() # x, y, x'-x, y'-y
-        heading = torch.atan2(pos[..., 3], pos[..., 2])
+        heading = self.custom_atan2(pos[..., 3], pos[..., 2])
+        # heading = torch.atan2(pos[..., 3], pos[..., 2])
         pos[..., 2] = torch.cos(heading)
         pos[..., 3] = torch.sin(heading)
         # lane: [0,0,1]
@@ -264,7 +268,20 @@ class LaneFusionEncoder(nn.Module):
         x_result[valid_indices] = x  # Fill in valid parts
         
         return x_result.view(B, P, -1) , mask_p.reshape(B, -1), pos.view(B, P, -1)
-
+    
+    def custom_atan2(self, rot_sine, rot_cosine):
+        # 防止除数为 0
+        safe_rot_cosine = torch.where(rot_cosine == 0, torch.full_like(rot_cosine, 1e-6), rot_cosine)
+        # 计算基本的 arctan 值
+        rot = torch.atan(rot_sine / safe_rot_cosine)
+        # 对于第二象限：sine >= 0 且 cosine < 0，角度加 π
+        mask_yp = (rot_sine >= 0) & (rot_cosine < 0)
+        # 对于第三象限：sine < 0 且 cosine < 0，角度减 π
+        mask_yn = (rot_sine < 0) & (rot_cosine < 0)
+        # 根据掩码调整角度
+        rot = torch.where(mask_yp, rot + torch.pi, rot)
+        rot = torch.where(mask_yn, rot - torch.pi, rot)
+        return rot
 
 class FusionEncoder(nn.Module):
     def __init__(self, hidden_dim=192, num_heads=6, drop_path_rate=0.3, depth=3, device='cuda'):

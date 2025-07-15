@@ -2,40 +2,55 @@
 import warnings
 import torch
 import numpy as np
-from typing import Deque, Dict, List, Type
+from typing import Deque, Dict, List, Type, Optional
+from pathlib import Path
+import os
+import time
+
 
 warnings.filterwarnings("ignore")
 
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.common.utils.interpolatable_state import InterpolatableState
+from nuplan.planning.scenario_builder.abstract_scenario import AbstractScenario
 from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
 from nuplan.planning.simulation.trajectory.abstract_trajectory import AbstractTrajectory
 from nuplan.planning.simulation.trajectory.interpolated_trajectory import InterpolatedTrajectory
 from nuplan.planning.simulation.observation.observation_type import Observation, DetectionsTracks
+from nuplan.planning.simulation.planner.planner_report import MLPlannerReport
 from nuplan.planning.simulation.planner.ml_planner.transform_utils import transform_predictions_to_states
 from nuplan.planning.simulation.planner.abstract_planner import (
-    AbstractPlanner, PlannerInitialization, PlannerInput
+    AbstractPlanner, PlannerInitialization, PlannerInput, PlannerReport,
 )
 
 from diffusion_planner.model.diffusion_planner import Diffusion_Planner
 from diffusion_planner.data_process.data_processor import DataProcessor
 from diffusion_planner.utils.config import Config
+from diffusion_planner.feature_builders.nuplan_scenario_render import NuplanScenarioRender
+from ..scenario_manager.scenario_manager import ScenarioManager
 
 def identity(ego_state, predictions):
     return predictions
 
 
 class DiffusionPlanner(AbstractPlanner):
+    requires_scenario: bool = True
     def __init__(
             self,
             config: Config,
             ckpt_path: str,
-
             past_trajectory_sampling: TrajectorySampling, 
             future_trajectory_sampling: TrajectorySampling,
 
+            save_dir=None,
+
+            eval_dt: float = 0.1,
+            eval_num_frames: int = 80,
+
             enable_ema: bool = True,
             device: str = "cpu",
+            render: bool = False,
+            scenario: AbstractScenario = None,
         ):
 
         assert device in ["cpu", "cuda"], f"device {device} not supported"
@@ -48,6 +63,10 @@ class DiffusionPlanner(AbstractPlanner):
         self._config = config
         self._ckpt_path = ckpt_path
 
+        self._render = render
+        self._imgs = []
+        self._scenario = scenario
+
         self._past_trajectory_sampling = past_trajectory_sampling
         self._future_trajectory_sampling = future_trajectory_sampling
 
@@ -59,7 +78,21 @@ class DiffusionPlanner(AbstractPlanner):
         self.data_processor = DataProcessor(config)
         
         self.observation_normalizer = config.observation_normalizer
+        self._scenario_manager: Optional[ScenarioManager] = None
+        
+        self._eval_dt = eval_dt
+        self._eval_num_frames = eval_num_frames
 
+        self._feature_building_runtimes: List[float] = []
+        self._inference_runtimes: List[float] = []
+
+        if render:
+            self._scene_render = NuplanScenarioRender()
+            if save_dir is not None:
+                self.video_dir = Path(save_dir)
+            else:
+                self.video_dir = Path(os.getcwd())
+            self.video_dir.mkdir(exist_ok=True, parents=True)
     def name(self) -> str:
         """
         Inherited.
@@ -78,7 +111,7 @@ class DiffusionPlanner(AbstractPlanner):
         """
         self._map_api = initialization.map_api
         self._route_roadblock_ids = initialization.route_roadblock_ids
-
+        # print(f"[initialize] _route_roadblock_ids:{self._route_roadblock_ids}")
         if self._ckpt_path is not None:
             state_dict:Dict = torch.load(self._ckpt_path, map_location=self._device)
             
@@ -96,6 +129,14 @@ class DiffusionPlanner(AbstractPlanner):
         self._planner.eval()
         self._planner = self._planner.to(self._device)
         self._initialization = initialization
+        self._scenario_manager = ScenarioManager(
+            map_api=initialization.map_api,
+            ego_state=None,
+            route_roadblocks_ids=initialization.route_roadblock_ids,
+            radius=self._eval_dt * self._eval_num_frames * 60 / 4.0,
+        )
+        if self._render:
+            self._scene_render.scenario_manager = self._scenario_manager
 
     def planner_input_to_model_inputs(self, planner_input: PlannerInput) -> Dict[str, torch.Tensor]:
         history = planner_input.history
@@ -111,13 +152,18 @@ class DiffusionPlanner(AbstractPlanner):
         predictions = np.concatenate([predictions[..., :2], heading], axis=-1) 
 
         states = transform_predictions_to_states(predictions, ego_state_history, self._future_horizon, self._step_interval)
-
+        
         return states
     
     def compute_planner_trajectory(self, current_input: PlannerInput) -> AbstractTrajectory:
         """
         Inherited.
         """
+        start_time = time.perf_counter()
+        self._feature_building_runtimes.append(time.perf_counter() - start_time)
+
+        start_time = time.perf_counter()
+
         inputs = self.planner_input_to_model_inputs(current_input)
 
         inputs = self.observation_normalizer(inputs)        
@@ -126,6 +172,75 @@ class DiffusionPlanner(AbstractPlanner):
         trajectory = InterpolatedTrajectory(
             trajectory=self.outputs_to_trajectory(outputs, current_input.history.ego_states)
         )
+        predictions = outputs["prediction"][0].cpu().numpy()
+        if self._render:
+            ego_state = current_input.history.ego_states[-1]
+            self._scenario_manager.update_ego_state(ego_state)
+            self._scenario_manager.update_drivable_area_map()
+            self._imgs.append(
+                self._scene_render.render_from_simulation(
+                    current_input=current_input,
+                    initialization=self._initialization,
+                    route_roadblock_ids=self._scenario_manager.get_route_roadblock_ids(),
+                    scenario=self._scenario,
+                    iteration=current_input.iteration.index,
+                    planning_trajectory=self._global_to_local(trajectory, ego_state),
+                    # candidate_trajectories=self._global_to_local(
+                    #     candidate_trajectories[rule_based_scores > 0], ego_state
+                    # ),
+                    # candidate_index=best_candidate_idx,
+                    predictions=predictions,
+                    return_img=True,
+                )
+            )
+        self._inference_runtimes.append(time.perf_counter() - start_time)
 
         return trajectory
     
+    def _global_to_local(self, global_trajectory: np.ndarray, ego_state: EgoState):
+        if isinstance(global_trajectory, InterpolatedTrajectory):
+            states: List[EgoState] = global_trajectory.get_sampled_trajectory()
+            global_trajectory = np.stack(
+                [
+                    np.array(
+                        [state.rear_axle.x, state.rear_axle.y, state.rear_axle.heading]
+                    )
+                    for state in states
+                ],
+                axis=0,
+            )
+
+        origin = ego_state.rear_axle.array
+        angle = ego_state.rear_axle.heading
+        rot_mat = np.array(
+            [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+        )
+        position = np.matmul(global_trajectory[..., :2] - origin, rot_mat)
+        heading = global_trajectory[..., 2] - angle
+
+        return np.concatenate([position, heading[..., None]], axis=-1)
+
+    def generate_planner_report(self, clear_stats: bool = True) -> PlannerReport:
+        """Inherited, see superclass."""
+        report = MLPlannerReport(
+            compute_trajectory_runtimes=self._compute_trajectory_runtimes,
+            feature_building_runtimes=self._feature_building_runtimes,
+            inference_runtimes=self._inference_runtimes,
+        )
+        if clear_stats:
+            self._compute_trajectory_runtimes: List[float] = []
+            self._feature_building_runtimes = []
+            self._inference_runtimes = []
+
+        if self._render:
+            import imageio
+
+            imageio.mimsave(
+                self.video_dir
+                / f"{self._scenario.log_name}_{self._scenario.token}.mp4",
+                self._imgs,
+                fps=10,
+            )
+            print("\n video saved to ", self.video_dir / "video.mp4\n")
+
+        return report
