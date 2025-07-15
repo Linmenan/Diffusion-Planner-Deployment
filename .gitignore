@@ -10,3 +10,6 @@ image*
 exp/
 cache/
 checkpoints/
+videos/*
+*.mp4
+*.pt

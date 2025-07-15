@@ -57,7 +57,7 @@ def _get_lane_polylines(
     lane_roadblock_ids = []
     layer_names = [SemanticMapLayer.LANE, SemanticMapLayer.LANE_CONNECTOR]
     layers = map_api.get_proximal_map_objects(point, radius, layer_names)
-
+    # print(f"[DFP]:layers:{layers}")
     map_objects = []
 
     for layer_name in layer_names:

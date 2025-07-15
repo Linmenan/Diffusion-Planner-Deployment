@@ -6,7 +6,7 @@ from nuplan.common.actor_state.state_representation import TimePoint
 from nuplan.common.actor_state.ego_state import EgoState
 from nuplan.planning.training.preprocessing.utils.agents_preprocessing import EgoInternalIndex
 from nuplan.planning.training.preprocessing.features.trajectory_utils import convert_absolute_to_relative_poses
-from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
+from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters, get_k9ud_parameters
 
 def get_ego_past_array_from_scenario(scenario, num_past_poses, past_time_horizon):
     
@@ -82,7 +82,8 @@ def calculate_additional_ego_states(ego_agent_past, time_stamp):
         yaw_rate = 0.0  # if the car is almost stopped, the yaw rate is unreliable
     else:
         steering_angle = np.arctan(
-            yaw_rate * get_pacifica_parameters().wheel_base / abs(cur_velocity)
+            # yaw_rate * get_pacifica_parameters().wheel_base / abs(cur_velocity)
+            yaw_rate * get_k9ud_parameters().wheel_base / abs(cur_velocity)
         )
         steering_angle = np.clip(steering_angle, -2 / 3 * np.pi, 2 / 3 * np.pi)
         yaw_rate = np.clip(yaw_rate, -0.95, 0.95)

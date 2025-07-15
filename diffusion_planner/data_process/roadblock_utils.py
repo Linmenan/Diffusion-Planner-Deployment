@@ -30,6 +30,7 @@ class BreadthFirstSearchRoadBlock:
         :param forward_search: whether to search in driving direction, defaults to True
         """
         self._map_api: Optional[AbstractMap] = map_api
+        # print(f"start_roadblock_id:{start_roadblock_id}")
         self._queue = deque([self.id_to_roadblock(start_roadblock_id), None])
         self._parent: Dict[str, Optional[RoadBlockGraphEdgeMapObject]] = dict()
         self._forward_search = forward_search
@@ -104,7 +105,9 @@ class BreadthFirstSearchRoadBlock:
         :return: roadblock class
         """
         block = self._map_api._get_roadblock(id)
+        # print(f"_get_roadblock_use_id[{id}]={block}")
         block = block or self._map_api._get_roadblock_connector(id)
+        # print(f"_get_roadblock_connector_use_id[{id}]={block}")
         return block
 
     @staticmethod
@@ -277,6 +280,7 @@ def route_roadblock_correction(
         block = block or map_api.get_map_object(
             id_, SemanticMapLayer.ROADBLOCK_CONNECTOR
         )
+        # print(f"[DFP]:route_roadblock_correction 找到block:{block} id:{id_}")
         route_roadblock_dict[id_] = block
 
     starting_block, starting_block_candidates = get_current_roadblock_candidates(

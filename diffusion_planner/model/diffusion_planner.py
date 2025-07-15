@@ -100,3 +100,39 @@ class Diffusion_Planner_Decoder(nn.Module):
         decoder_outputs = self.decoder(encoder_outputs, inputs)
         
         return decoder_outputs
+
+class OnnxWrapper(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self,
+                neighbor_agents_past,
+                ego_current_state,
+                static_objects,
+                lanes,
+                lanes_speed_limit,
+                lanes_has_speed_limit,
+                route_lanes,
+                route_lanes_speed_limit,
+                route_lanes_has_speed_limit):
+        """
+        这个 forward 方法的参数列表现在与你提供的字典键完全匹配。
+        """
+        
+        # 1. 将所有独立的张量输入重新组装成一个字典
+        inputs_dict = {
+            "neighbor_agents_past": neighbor_agents_past,
+            "ego_current_state": ego_current_state,
+            "static_objects": static_objects,
+            "lanes": lanes,
+            "lanes_speed_limit": lanes_speed_limit,
+            "lanes_has_speed_limit": lanes_has_speed_limit,
+            "route_lanes": route_lanes,
+            "route_lanes_speed_limit": route_lanes_speed_limit,
+            "route_lanes_has_speed_limit": route_lanes_has_speed_limit,
+        }
+        
+        # 2. 调用原始模型的 forward 函数
+        _, decoder_outputs = self.model(inputs_dict)
+        return decoder_outputs['prediction']

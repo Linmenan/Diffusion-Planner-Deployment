@@ -2,11 +2,18 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from nuplan.common.actor_state.vehicle_parameters import VehicleParameters, get_pacifica_parameters
+from nuplan.common.actor_state.vehicle_parameters import VehicleParameters, get_pacifica_parameters, get_k9ud_parameters
 
-ego_size = [get_pacifica_parameters().length, get_pacifica_parameters().width]
+EGO_PARAMS = get_k9ud_parameters()
+ego_size = [EGO_PARAMS.length, EGO_PARAMS.width]
 
-COG_TO_REAR = 1.67
+
+HALF_WIDTH = EGO_PARAMS.half_width
+FRONT_LENGTH = EGO_PARAMS.front_length
+REAR_LENGTH = EGO_PARAMS.rear_length
+
+COG_TO_REAR = EGO_PARAMS.cog_position_from_rear_axle()
+
 CLIP_DISTANCE = 1.0
 INFLATION = 1.0
 

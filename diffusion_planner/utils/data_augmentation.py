@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from typing import List, Optional, Tuple, Union, cast
 
-from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters
+from nuplan.common.actor_state.vehicle_parameters import get_pacifica_parameters, get_k9ud_parameters
 
 NUM_REFINE = 20
 REFINE_HORIZON = 2.0
@@ -63,7 +63,8 @@ class StatePerturbation():
         self._device = torch.device(device)
         self._low = torch.tensor(low).to(self._device)
         self._high = torch.tensor(high).to(self._device)
-        self._wheel_base = get_pacifica_parameters().wheel_base
+        # self._wheel_base = get_pacifica_parameters().wheel_base
+        self._wheel_base = get_k9ud_parameters().wheel_base
         
         self.refine_horizon = REFINE_HORIZON
         self.num_refine = NUM_REFINE

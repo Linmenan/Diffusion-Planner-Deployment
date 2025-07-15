@@ -2,6 +2,7 @@ import math
 import torch
 import torch.nn as nn
 from timm.models.layers import Mlp
+from diffusion_planner.model.module.custom_multihead_attention import CustomMultiheadAttention
 
 def modulate(x, shift, scale, only_first=False):
     if only_first:
@@ -70,7 +71,8 @@ class DiTBlock(nn.Module):
     def __init__(self, dim=192, heads=6, dropout=0.1, mlp_ratio=4.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
+        self.attn = CustomMultiheadAttention(dim, heads, dropout, batch_first=True)
+        # self.attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm2 = nn.LayerNorm(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         approx_gelu = lambda: nn.GELU(approximate="tanh")
@@ -80,7 +82,8 @@ class DiTBlock(nn.Module):
             nn.Linear(dim, 6 * dim, bias=True)
         )
         self.norm3 = nn.LayerNorm(dim)
-        self.cross_attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
+        self.cross_attn = CustomMultiheadAttention(dim, heads, dropout, batch_first=True)
+        # self.cross_attn = nn.MultiheadAttention(dim, heads, dropout, batch_first=True)
         self.norm4 = nn.LayerNorm(dim)
 
         self.mlp2 = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=approx_gelu, drop=0)
@@ -90,12 +93,14 @@ class DiTBlock(nn.Module):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(y).chunk(6, dim=1)
 
         modulated_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        x = x + gate_msa.unsqueeze(1) * self.attn(modulated_x, modulated_x, modulated_x, key_padding_mask=attn_mask)[0]
+        x = x + gate_msa.unsqueeze(1) * self.attn(modulated_x, modulated_x, modulated_x, key_padding_mask=attn_mask)
+        # x = x + gate_msa.unsqueeze(1) * self.attn(modulated_x, modulated_x, modulated_x, key_padding_mask=attn_mask)[0]
 
         modulated_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp.unsqueeze(1) * self.mlp1(modulated_x)
 
-        x = self.cross_attn(self.norm3(x), cross_c, cross_c)[0]
+        x = self.cross_attn(self.norm3(x), cross_c, cross_c) 
+        # x = self.cross_attn(self.norm3(x), cross_c, cross_c)[0]
         x = self.mlp2(self.norm4(x))
 
         return x
