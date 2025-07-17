@@ -158,7 +158,7 @@ def build_lightning_module(
             warmup_epochs=cfg.warmup_epochs,
         )
     else:
-        print(f"optimizer:{cfg.optimizer}")
+        # print(f"optimizer:{cfg.optimizer}")
         objectives = build_objectives(cfg)
         metrics = build_training_metrics(cfg)
         model = LightningModuleWrapper(

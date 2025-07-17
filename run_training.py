@@ -4,7 +4,6 @@ from typing import Optional
 import hydra
 import numpy
 import pytorch_lightning as pl
-
 from nuplan.planning.script.builders.folder_builder import (
     build_training_experiment_folder,
 )
@@ -13,7 +12,6 @@ from nuplan.planning.script.builders.worker_pool_builder import build_worker
 from nuplan.planning.script.profiler_context_manager import ProfilerContextManager
 from nuplan.planning.script.utils import set_default_path
 from nuplan.planning.training.experiments.caching import cache_data
-
 from omegaconf import DictConfig
 
 from diffusion_planner.custom_training import (

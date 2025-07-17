@@ -32,6 +32,7 @@ from shapely import LineString, Point
 from diffusion_planner.features.diffusion_feature import DiffusionFeature
 from diffusion_planner.scenario_manager.cost_map_manager import CostMapManager
 from diffusion_planner.scenario_manager.scenario_manager import OccupancyType, ScenarioManager
+<<<<<<< HEAD
 from diffusion_planner.data_process.roadblock_utils import route_roadblock_correction
 from diffusion_planner.data_process.ego_process import get_ego_past_array_from_scenario, get_ego_future_array_from_scenario, calculate_additional_ego_states
 from diffusion_planner.data_process.map_process import get_neighbor_vector_set_map, map_process
@@ -41,6 +42,8 @@ sampled_tracked_objects_to_array_list,
 sampled_static_objects_to_array_list,
 agent_future_process
 )
+=======
+>>>>>>> f29ef7c49132ed13118dce03dcb46abd77b0ea50
 from . import common
 
 
@@ -535,7 +538,11 @@ class DiffusionFeatureBuilder(AbstractFeatureBuilder):
         valid_mask = np.zeros((N, T), dtype=bool)
         polygon = [None] * N
 
+<<<<<<< HEAD
         if N == 0:
+=======
+        if N == 0 or self.disable_agent:
+>>>>>>> f29ef7c49132ed13118dce03dcb46abd77b0ea50
             return (
                 {
                     "position": position,
