@@ -103,6 +103,8 @@ def get_args():
     args.state_normalizer = StateNormalizer.from_json(args)
     args.observation_normalizer = ObservationNormalizer.from_json(args)
     
+    print(f"state_normalizer:{args.state_normalizer}")
+    print(f"observation_normalizer:{args.observation_normalizer}")
     return args
 
 def model_training(args):

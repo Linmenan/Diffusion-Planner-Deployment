@@ -1,44 +1,46 @@
-defaults:
-  - _self_          # 让本文件最后应用
+_target_: diffusion_planner.model.diffusion_planner.Diffusion_Planner
+config:
+  device: cuda
+  hidden_dim: 192
+  encoder_depth: 3
+  decoder_depth: 3
+  num_heads: 6
+  agent_num: 10
+  static_objects_num: 5
+  lane_num: 70
+  lane_len: 20
+  route_num: 25
+  time_len: 21
+  future_len: 80
+  encoder_drop_path_rate: 0.1
+  decoder_drop_path_rate: 0.1
+  static_objects_state_dim: 10
+  predicted_neighbor_num: 10
+  diffusion_model_type: x_start
+  guidance_fn: null
 
-model:
+  state_normalizer:
+    _target_: diffusion_planner.utils.normalizer.StateNormalizer.from_yaml
+    _args_:
+      - normalization_file_path: "/home/bydguikong/yy_ws/Diffusion-Planner/diffusion_planner/config/normalization.yaml"  # 直接传递文件路径
+        predicted_neighbor_num: 10  # 传递 predicted_neighbor_num
+  observation_normalizer:
+    _target_: diffusion_planner.utils.normalizer.ObservationNormalizer.from_yaml
+    _args_:
+      - normalization_file_path: "/home/bydguikong/yy_ws/Diffusion-Planner/diffusion_planner/config/normalization.yaml"  # 直接传递文件路径
+        predicted_neighbor_num: 10  # 传递 predicted_neighbor_num
 
-  _target_: diffusion_planner.model.diffusion_planner.Diffusion_Planner
-  config:
-    # ────────── 模型 & 训练参数 ──────────
-    device: cuda
-    hidden_dim: 192
-    encoder_depth: 3
-    decoder_depth: 3
-    num_heads: 6
-    agent_num: 32
-    static_objects_num: 5
-    lane_num: 70
-    lane_len: 20
-    route_num: 25
-    time_len: 21
-    future_len: 80
-    encoder_drop_path_rate: 0.1
-    decoder_drop_path_rate: 0.1
-    static_objects_state_dim: 10
-    predicted_neighbor_num: 10
-    diffusion_model_type: x_start
-    guidance_fn: null
-    normalization_file_path: normalization.json
-
-    # ① StateNormalizer — 需要两个字段，所以打包成字典
-    state_normalizer:
-      _target_: diffusion_planner.utils.normalizer.StateNormalizer.from_json
-      _recursive_: false
-      _args_:
-        # 传给 StateNormalizer 的是 *一个* DictConfig
-        - {
-            normalization_file_path: ${model.config.normalization_file_path},
-            predicted_neighbor_num: ${model.config.predicted_neighbor_num}
-          }
-
-    observation_normalizer:
-      _target_: diffusion_planner.utils.normalizer.ObservationNormalizer.from_json
-      _recursive_: false
-      _args_:
-        - ${model.config.normalization_file_path}
+feature_builder:
+  _target_: diffusion_planner.feature_builders.diffusion_feature_builder.DiffusionFeatureBuilder
+  _convert_: "all"
+  radius: 80
+  history_horizon: 2
+  future_horizon: 8
+  sample_interval: 0.1
+  max_agents: 10
+  max_static_obstacles: 5
+  max_ped_bike: 10
+  lane_num: 70
+  route_num: 25
+  lane_len: 20
+  route_len: 20

@@ -49,6 +49,8 @@ def diffusion_loss_func(
     }
 
     _, decoder_output = model(merged_inputs) # [B, P, 1 + T, 4]
+    # for k,v in decoder_output.items():
+    #         print(f"model output:{k}:{v.shape},dtype={v.dtype}")
     score = decoder_output["score"][:, :, 1:, :] # [B, P, T, 4]
 
     if model_type == "score":

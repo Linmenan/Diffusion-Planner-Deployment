@@ -1,7 +1,7 @@
 from copy import copy, deepcopy
 import torch
 
-from diffusion_planner.utils.train_utils import openjson
+from diffusion_planner.utils.train_utils import openjson, openyaml
 
 class StateNormalizer:
     def __init__(self, mean, std):
@@ -11,6 +11,14 @@ class StateNormalizer:
     @classmethod
     def from_json(cls, args):
         data = openjson(args.normalization_file_path)
+        mean = [[data["ego"]["mean"]]] + [[data["neighbor"]["mean"]]] * args.predicted_neighbor_num
+        std = [[data["ego"]["std"]]] + [[data["neighbor"]["std"]]] * args.predicted_neighbor_num
+        return cls(mean, std)
+    
+    @classmethod
+    def from_yaml(cls, args):
+        # 读取 YAML 文件
+        data = openyaml(args.normalization_file_path)
         mean = [[data["ego"]["mean"]]] + [[data["neighbor"]["mean"]]] * args.predicted_neighbor_num
         std = [[data["ego"]["std"]]] + [[data["neighbor"]["std"]]] * args.predicted_neighbor_num
         return cls(mean, std)
@@ -45,7 +53,20 @@ class ObservationNormalizer:
             if k not in ["ego", "neighbor"]:
                 ndt[k]= {"mean": torch.tensor(v["mean"], dtype=torch.float32), "std": torch.tensor(v["std"], dtype=torch.float32)}
         return cls(ndt)
-
+    
+    @classmethod
+    def from_yaml(cls, args):
+        # 从 YAML 文件中读取数据
+        data = openyaml(args.normalization_file_path)
+        ndt = {}
+        for k, v in data.items():
+            if k not in ["ego", "neighbor"]:  # 忽略 "ego" 和 "neighbor"
+                ndt[k] = {
+                    "mean": torch.tensor(v["mean"], dtype=torch.float32),
+                    "std": torch.tensor(v["std"], dtype=torch.float32)
+                }
+        return cls(ndt)
+    
     def __call__(self, data):
         norm_data = copy(data)
         for k, v in self._normalization_dict.items():

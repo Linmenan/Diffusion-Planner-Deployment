@@ -32,39 +32,57 @@ from shapely import LineString, Point
 from diffusion_planner.features.diffusion_feature import DiffusionFeature
 from diffusion_planner.scenario_manager.cost_map_manager import CostMapManager
 from diffusion_planner.scenario_manager.scenario_manager import OccupancyType, ScenarioManager
+from diffusion_planner.data_process.roadblock_utils import route_roadblock_correction
+from diffusion_planner.data_process.ego_process import get_ego_past_array_from_scenario, get_ego_future_array_from_scenario, calculate_additional_ego_states
+from diffusion_planner.data_process.map_process import get_neighbor_vector_set_map, map_process
+from diffusion_planner.data_process.agent_process import (
+agent_past_process, 
+sampled_tracked_objects_to_array_list,
+sampled_static_objects_to_array_list,
+agent_future_process
+)
 from . import common
 
 
 class DiffusionFeatureBuilder(AbstractFeatureBuilder):
     def __init__(
-        self,
-        radius: float = 100,
-        history_horizon: float = 2,
-        future_horizon: float = 8,
-        sample_interval: float = 0.1,
-        max_agents: int = 64,
-        max_static_obstacles: int = 10,
-        build_reference_line: bool = False,
-        disable_agent: bool = False,
-    ) -> None:
+            self, 
+            sample_interval=0.1,
+            radius=100,
+            history_horizon=2,
+            future_horizon=8,
+            max_agents=32,
+            max_static_obstacles=5,
+            max_ped_bike=10,
+            build_reference_line: bool = False,
+            lane_num=70,
+            route_num=25,
+            lane_len=20,
+            route_len=20,
+                 ) -> None:
         super().__init__()
 
-        self.radius = radius
-        self.history_horizon = history_horizon
-        self.future_horizon = future_horizon
-        self.history_samples = int(self.history_horizon / sample_interval)
-        self.future_samples = int(self.future_horizon / sample_interval)
         self.sample_interval = sample_interval
+        self.history_horizon = history_horizon # [seconds]
+        self.history_samples = int(self.history_horizon/self.sample_interval)
+        self.future_horizon = future_horizon # [seconds]
+        self.future_samples = int(self.future_horizon/self.sample_interval)
+
+        self.max_agents = max_agents
+        self.max_static_obstacles = max_static_obstacles
+        self.max_ped_bike = max_ped_bike # Limit the number of pedestrians and bicycles in the agent.
+        self.radius = radius # [m] query radius scope relative to the current pose.
+        self.scenario_manager = None
+        self.build_reference_line = build_reference_line
         self.ego_params = get_pacifica_parameters()
         self.length = self.ego_params.length
         self.width = self.ego_params.width
-        self.max_agents = max_agents
-        self.max_static_obstacles = max_static_obstacles
-        self.scenario_manager = None
-        self.build_reference_line = build_reference_line
-        self.disable_agent = disable_agent
         self.inference = None
         self.simulation = False
+
+        self._map_features = ['LANE', 'LEFT_BOUNDARY', 'RIGHT_BOUNDARY', 'ROUTE_LANES'] # name of map features to be extracted.
+        self._max_elements = {'LANE': lane_num, 'LEFT_BOUNDARY': lane_num, 'RIGHT_BOUNDARY': lane_num, 'ROUTE_LANES': route_num} # maximum number of elements to extract per feature layer.
+        self._max_points = {'LANE': lane_len, 'LEFT_BOUNDARY': lane_len, 'RIGHT_BOUNDARY': lane_len, 'ROUTE_LANES': route_len} # maximum number of points per feature to extract per feature layer.
 
         self.interested_objects_types = [
             TrackedObjectType.EGO,
@@ -101,6 +119,9 @@ class DiffusionFeatureBuilder(AbstractFeatureBuilder):
         scenario: AbstractScenario,
         iteration=0,
     ) -> AbstractModelFeature:
+        """
+        高级接口，从scenario对象中提取所有原始数据，并调用_build_feature进行处理。
+        """
         ego_cur_state = scenario.initial_ego_state
 
         # ego features
@@ -140,20 +161,94 @@ class DiffusionFeatureBuilder(AbstractFeatureBuilder):
             past_tracked_objects + [present_tracked_objects] + future_tracked_objects
         )
 
-        data = self._build_feature(
-            present_idx=self.history_samples,
-            ego_state_list=ego_state_list,
-            tracked_objects_list=tracked_objects_list,
-            route_roadblocks_ids=scenario.get_route_roadblock_ids(),
-            map_api=scenario.map_api,
-            mission_goal=scenario.get_mission_goal(),
-            traffic_light_status=scenario.get_traffic_light_status_at_iteration(
-                iteration
-            ),
-            inference=False,
+        # data = self._build_feature(
+        #     present_idx=self.history_samples,
+        #     ego_state_list=ego_state_list,
+        #     tracked_objects_list=tracked_objects_list,
+        #     route_roadblocks_ids=scenario.get_route_roadblock_ids(),
+        #     map_api=scenario.map_api,
+        #     mission_goal=scenario.get_mission_goal(),
+        #     traffic_light_status=scenario.get_traffic_light_status_at_iteration(
+        #         iteration
+        #     ),
+        #     inference=False,
+        # )
+        data = {}
+        map_name = scenario._map_name
+        token = scenario.token
+        map_api = scenario.map_api        
+
+        '''
+        ego & agents past
+        '''
+        ego_state = scenario.initial_ego_state
+        ego_coords = Point2D(ego_state.rear_axle.x, ego_state.rear_axle.y)
+        anchor_ego_state = np.array([ego_state.rear_axle.x, ego_state.rear_axle.y, ego_state.rear_axle.heading], dtype=np.float64)
+        ego_agent_past, time_stamps_past = get_ego_past_array_from_scenario(scenario, self.history_samples, self.history_horizon)
+
+        present_tracked_objects = scenario.initial_tracked_objects.tracked_objects
+        past_tracked_objects = [
+            tracked_objects.tracked_objects
+            for tracked_objects in scenario.get_past_tracked_objects(
+                iteration=0, time_horizon=self.history_horizon, num_samples=self.history_samples
+            )
+        ]
+        sampled_past_observations = past_tracked_objects + [present_tracked_objects]
+        neighbor_agents_past, neighbor_agents_types = \
+            sampled_tracked_objects_to_array_list(sampled_past_observations)
+        
+        static_objects, static_objects_types = sampled_static_objects_to_array_list(present_tracked_objects)
+
+        ego_agent_past, neighbor_agents_past, neighbor_indices, static_objects = \
+            agent_past_process(ego_agent_past, neighbor_agents_past, neighbor_agents_types, self.max_agents, static_objects, static_objects_types, self.max_static_obstacles, self.max_ped_bike, anchor_ego_state)
+        
+        '''
+        Map
+        '''
+        route_roadblock_ids = scenario.get_route_roadblock_ids()
+        traffic_light_data = list(scenario.get_traffic_light_status_at_iteration(0))
+
+        if route_roadblock_ids != ['']:
+            route_roadblock_ids = route_roadblock_correction(
+                ego_state, map_api, route_roadblock_ids
+            )
+
+        coords, traffic_light_data, speed_limit, lane_route = get_neighbor_vector_set_map(
+            map_api, self._map_features, ego_coords, self.radius, traffic_light_data
         )
 
-        return data
+        vector_map = map_process(route_roadblock_ids, anchor_ego_state, coords, traffic_light_data, speed_limit, lane_route, self._map_features, 
+                                self._max_elements, self._max_points)
+
+        '''
+        ego & agents future
+        '''
+        ego_agent_future = get_ego_future_array_from_scenario(scenario, ego_state, self.future_samples, self.future_horizon)
+
+        present_tracked_objects = scenario.initial_tracked_objects.tracked_objects
+        future_tracked_objects = [
+            tracked_objects.tracked_objects
+            for tracked_objects in scenario.get_future_tracked_objects(
+                iteration=0, time_horizon=self.future_horizon, num_samples=self.future_samples
+            )
+        ]
+
+        sampled_future_observations = [present_tracked_objects] + future_tracked_objects
+        future_tracked_objects_array_list, _ = sampled_tracked_objects_to_array_list(sampled_future_observations)
+        neighbor_agents_future = agent_future_process(anchor_ego_state, future_tracked_objects_array_list, self.max_agents, neighbor_indices)
+
+
+        '''
+        ego current
+        '''
+        ego_current_state = calculate_additional_ego_states(ego_agent_past, time_stamps_past)
+
+        # gather data "map_name": map_name, "token": token, 
+        data = {"ego_current_state": ego_current_state, "ego_agent_future": ego_agent_future,
+                "neighbor_agents_past": neighbor_agents_past, "neighbor_agents_future": neighbor_agents_future, "static_objects": static_objects}
+        data.update(vector_map)
+
+        return DiffusionFeature(data)
 
     def get_features_from_simulation(
         self, current_input: PlannerInput, initialization: PlannerInitialization
@@ -440,7 +535,7 @@ class DiffusionFeatureBuilder(AbstractFeatureBuilder):
         valid_mask = np.zeros((N, T), dtype=bool)
         polygon = [None] * N
 
-        if N == 0 or self.disable_agent:
+        if N == 0:
             return (
                 {
                     "position": position,

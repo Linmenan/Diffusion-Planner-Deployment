@@ -14,7 +14,6 @@ from diffusion_planner.model.module.dit import TimestepEmbedder, DiTBlock, Final
 class Decoder(nn.Module):
     def __init__(self, config):
         super().__init__()
-
         dpr = config.decoder_drop_path_rate
         self._predicted_neighbor_num = config.predicted_neighbor_num
         self._future_len = config.future_len

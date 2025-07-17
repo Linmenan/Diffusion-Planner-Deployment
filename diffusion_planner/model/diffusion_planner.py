@@ -2,14 +2,31 @@
 import torch
 import torch.nn as nn
 
+from nuplan.planning.training.modeling.torch_module_wrapper import TorchModuleWrapper
+from nuplan.planning.simulation.trajectory.trajectory_sampling import TrajectorySampling
+from nuplan.planning.training.preprocessing.target_builders.ego_trajectory_target_builder import (
+    EgoTrajectoryTargetBuilder,
+)
+
+from diffusion_planner.feature_builders.diffusion_feature_builder import DiffusionFeatureBuilder
+
 from diffusion_planner.model.module.encoder import Encoder
 from diffusion_planner.model.module.decoder import Decoder
 
+trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
 
-class Diffusion_Planner(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-
+class Diffusion_Planner(TorchModuleWrapper):
+    def __init__(self,
+                 config,
+                 feature_builder: DiffusionFeatureBuilder = DiffusionFeatureBuilder(),
+                 ):
+        super().__init__(
+            feature_builders=[feature_builder],
+            target_builders=[EgoTrajectoryTargetBuilder(trajectory_sampling)],
+            future_trajectory_sampling=trajectory_sampling,
+        )
+        self.radius = feature_builder.radius
+        self.config = config
         self.encoder = Diffusion_Planner_Encoder(config)
         self.decoder = Diffusion_Planner_Decoder(config)
 
@@ -18,7 +35,8 @@ class Diffusion_Planner(nn.Module):
         return self.decoder.decoder.sde
     
     def forward(self, inputs):
-
+        # for k,v in inputs.items():
+        #     print(f"model imput:{k}:{v.shape},dtype={v.dtype}")
         encoder_outputs = self.encoder(inputs)
         decoder_outputs = self.decoder(encoder_outputs, inputs)
 

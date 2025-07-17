@@ -1,5 +1,5 @@
 # @package _global_
-job_name: scope
+job_name: diffusion
 py_func: train
 objective_aggregate_mode: mean
 

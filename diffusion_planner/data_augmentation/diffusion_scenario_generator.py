@@ -17,8 +17,8 @@ from nuplan.planning.training.data_augmentation.data_augmentation_util import (
 )
 from nuplan.planning.training.modeling.types import FeaturesType, TargetsType
 
-from diffusion_planner.features.scope_feature import ScopeFeature
-from diffusion_planner.utils.collision_checker import CollisionChecker
+from diffusion_planner.features.diffusion_feature import DiffusionFeature
+# from diffusion_planner.utils.collision_checker import CollisionChecker
 from diffusion_planner.utils.utils import crop_img_from_center
 from diffusion_planner.utils.utils import shift_and_rotate_img
 
@@ -26,7 +26,7 @@ MAP_CONTRAST_TYPE = 0
 AGENT_CONTRAST_TYPE = 1
 
 
-class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
+class DiffusionScenarioGenerator(AbstractAugmentor):
     def __init__(
         self,
         history_steps=21,
@@ -47,7 +47,7 @@ class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
         self.history_steps = history_steps
         self.max_interaction_horizon = max_interaction_horizon
         self._random_offset_generator = UniformNoise(low, high)
-        self._collision_checker = CollisionChecker()
+        # self._collision_checker = CollisionChecker()
         self._rear_to_cog = get_pacifica_parameters().rear_axle_to_center
         self.use_negative_sample = use_negative_sample
 
@@ -59,17 +59,17 @@ class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
     ) -> Tuple[FeaturesType, TargetsType]:
         """Inherited, see superclass."""
 
-        feature: ScopeFeature = features["feature"]
+        feature: DiffusionFeature = features["feature"]
 
-        feature.data_p = self.generate_positive_sample(feature.data)
-        if "cost_maps" in feature.data:
-            feature.data["cost_maps"] = crop_img_from_center(
-                feature.data["cost_maps"], (500, 500)
-            )
-        if self.use_negative_sample:
-            feature.data_n, feature.data_n_info = self.generate_negative_sample(
-                feature.data
-            )
+        # feature.data_p = self.generate_positive_sample(feature.data)
+        # if "cost_maps" in feature.data:
+        #     feature.data["cost_maps"] = crop_img_from_center(
+        #         feature.data["cost_maps"], (500, 500)
+        #     )
+        # if self.use_negative_sample:
+        #     feature.data_n, feature.data_n_info = self.generate_negative_sample(
+        #         feature.data
+        #     )
 
         features["feature"] = feature
 
@@ -133,7 +133,7 @@ class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
             for k, v in new_data["agent"].items():
                 new_data["agent"][k] = v[~drop_mask]
 
-        new_data = ScopeFeature.normalize(new_data).data
+        new_data = DiffusionFeature.normalize(new_data).data
 
         return new_data
     
@@ -195,14 +195,14 @@ class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
             np.concatenate([agents_position, agents_heading[..., None]], axis=-1)
         ).unsqueeze(0)
 
-        collisions = self._collision_checker.collision_check(
-            ego_state=ego_state,
-            objects=objects_state,
-            objects_width=torch.from_numpy(agents_shape[:, 0]).unsqueeze(0),
-            objects_length=torch.from_numpy(agents_shape[:, 1]).unsqueeze(0),
-        )
-
-        return not collisions.any()
+        # collisions = self._collision_checker.collision_check(
+        #     ego_state=ego_state,
+        #     objects=objects_state,
+        #     objects_width=torch.from_numpy(agents_shape[:, 0]).unsqueeze(0),
+        #     objects_length=torch.from_numpy(agents_shape[:, 1]).unsqueeze(0),
+        # )
+        # return not collisions.any()
+        return False
 
     def neg_traffic_light_inversion(self, data):
         new_data = deepcopy(data)

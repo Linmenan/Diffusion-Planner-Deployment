@@ -5,11 +5,18 @@ from mmengine import fileio
 import io
 import os
 import json
+import yaml
+
+
+def openyaml(path):
+    value = fileio.get_text(path)
+    data = yaml.safe_load(value)
+    return data
 
 def openjson(path):
-       value  = fileio.get_text(path)
-       dict = json.loads(value)
-       return dict
+    value  = fileio.get_text(path)
+    dict = json.loads(value)
+    return dict
 
 def opendata(path):
     

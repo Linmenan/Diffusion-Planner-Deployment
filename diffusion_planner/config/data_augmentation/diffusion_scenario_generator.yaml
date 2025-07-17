@@ -1,5 +1,5 @@
-scope_augmentation:
-  _target_: diffusion_planner.data_augmentation.diffusion_scenario_generator.DiffusionContrastiveScenarioGenerator
+diffusion_augmentation:
+  _target_: diffusion_planner.data_augmentation.diffusion_scenario_generator.DiffusionScenarioGenerator
   _convert_: "all"
 
   history_steps: 21

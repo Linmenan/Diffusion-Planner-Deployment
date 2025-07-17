@@ -16,14 +16,15 @@ from nuplan.planning.training.modeling.types import (
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torchmetrics import MetricCollection
-from diffusion_planner.metrics import MR, minADE, minFDE, mulADE, MVNLoss
-from diffusion_planner.metrics.prediction_avg_ade import PredAvgADE
-from diffusion_planner.metrics.prediction_avg_fde import PredAvgFDE
-from diffusion_planner.optim.warmup_cos_lr import WarmupCosLR
+from diffusion_planner.utils.train_utils import get_epoch_mean_loss
+from diffusion_planner.utils import ddp
+from diffusion_planner.loss import diffusion_loss_func
+from diffusion_planner.utils.lr_schedule import CosineAnnealingWarmUpRestarts
+from diffusion_planner.utils.normalizer import StateNormalizer
 
-from .loss.esdf_collision_loss import ESDFCollisionLoss
+# from .loss.esdf_collision_loss import ESDFCollisionLoss
 from pytorch_lightning.utilities import grad_norm
-from diffusion_planner.utils.min_norm_solvers import MinNormSolver
+# from diffusion_planner.utils.min_norm_solvers import MinNormSolver
 
 logger = logging.getLogger(__name__)
 
@@ -36,33 +37,18 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        use_collision_loss=True,
-        use_contrast_loss=False,
-        regulate_yaw=False,
-        objective_aggregate_mode: str = "mean",
-        mul_ade_loss: list[str] = ['phase_loss', 'scale_loss'],
-        dynamic_weight: bool = True,
-        max_horizon: int = 10,
-        use_dwt: bool = False,
-        learning_output: str = 'velocity',
-        init_weights: list[float] = [1, 1, 1, 1, 1, 1, 1, 1],
-        wavelet: list[str] = ['cgau1', 'constant', 'bior1.3', 'constant'],
-        wtd_with_history: bool = False,
-        approximation_norm: bool = False,
-        time_decay: bool = False,
-        time_norm: bool = False,
+        init_weights: list[float] = [1, 1],
+        diffusion_model_type: str = 'x_start',
+        ddp:bool=True
     ) -> None:
         """
-        Initializes the class.
-
-        :param model: pytorch model
-        :param objectives: list of learning objectives used for supervision at each step
-        :param metrics: list of planning metrics computed at each step
-        :param batch_size: batch_size taken from dataloader config
-        :param optimizer: config for instantiating optimizer. Can be 'None' for older models.
-        :param lr_scheduler: config for instantiating lr_scheduler. Can be 'None' for older models and when an lr_scheduler is not being used.
-        :param warm_up_lr_scheduler: config for instantiating warm up lr scheduler. Can be 'None' for older models and when a warm up lr_scheduler is not being used.
-        :param objective_aggregate_mode: how should different objectives be combined, can be 'sum', 'mean', and 'max'.
+        初始化 Lightning 模块.
+        
+        :param model: 你的 PyTorch 模型.
+        :param lr: 学习率.
+        :param weight_decay: 权重衰减.
+        # ... 其他参数 ...
+        :param diffusion_model_type: 扩散模型类型.
         """
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -72,51 +58,21 @@ class LightningTrainer(pl.LightningModule):
         self.weight_decay = weight_decay
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
-        self.objective_aggregate_mode = objective_aggregate_mode
-        self.history_steps = model.history_steps
-        self.use_collision_loss = use_collision_loss
-        self.use_contrast_loss = use_contrast_loss
-        self.regulate_yaw = regulate_yaw
-
-        self.radius = model.radius
-        self.num_modes = model.num_modes
-        self.mode_interval = self.radius / self.num_modes
-        self.time_decay = time_decay
-        self.time_norm = time_norm
-
-        if use_collision_loss:
-            self.collision_loss = ESDFCollisionLoss()
-        self.mul_ade = mulADE(k=1, 
-                              with_grad=True,
-                              mul_ade_loss=mul_ade_loss, 
-                              max_horizon=max_horizon, 
-                              learning_output=learning_output,
-                              wtd_with_history=wtd_with_history,
-                              wavelet=wavelet,
-                              approximation_norm=approximation_norm,
-                              use_dwt=use_dwt,
-                              ).to(self.device)
-        self.dynamic_weight = dynamic_weight
-        print(f"self.device: {self.device}")
+        # 将依赖项保存为类属性
+        self.diffusion_model_type = diffusion_model_type
+        self.ddp = ddp
         init_weights = [float(w) for w in init_weights]
         self.weights = torch.tensor(init_weights, dtype=torch.float32)
         self.weights = self.weights.to(self.device)
-        print(f"self.weights dtype after to device: {self.weights.dtype}")
-        if self.dynamic_weight:
-            # self.weights = torch.autograd.Variable(self.weights, requires_grad=True)
-            self.weights.requires_grad = True
-        self.mvn_loss = MVNLoss(k=3, with_grad=True).to(self.device)
-        print('WARNING: Overall future time horizon is set to 80')
-        self.OT = 80
-
     def on_fit_start(self) -> None:
+        # pass
         metrics_collection = MetricCollection(
             [
-                minADE().to(self.device),
-                minFDE().to(self.device),
-                MR(miss_threshold=2).to(self.device),
-                PredAvgADE().to(self.device),
-                PredAvgFDE().to(self.device),
+                # minADE().to(self.device),
+                # minFDE().to(self.device),
+                # MR(miss_threshold=2).to(self.device),
+                # PredAvgADE().to(self.device),
+                # PredAvgFDE().to(self.device),
             ]
         )
         self.metrics = {
@@ -127,6 +83,8 @@ class LightningTrainer(pl.LightningModule):
     def _step(
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], prefix: str
     ) -> torch.Tensor:
+        # print(f"LightingTrainer _step _step _step _step _step")
+        
         """
         Propagates the model forward and backwards and computes/logs losses and metrics.
 
@@ -136,187 +94,122 @@ class LightningTrainer(pl.LightningModule):
         :param prefix: prefix prepended at each artifact's name during logging
         :return: model's scalar loss
         """
-
         features, targets, scenarios = batch
-        
-        # print(f"features:{type(features)}")
-        # print(f"targets:type:{type(targets)}")
-        # print(f"scenarios:type:{type(scenarios)}")
+        data = features["feature"].data
+        # ===================================================================
+        #  只有在训练阶段才计算和返回损失
+        # ===================================================================
+        if self.training:
+            '''
+            data["neighbor_agents_past"]:torch.Size([1, 32, 21, 11]),dtype=torch.float32,device:cuda:0
+            data["neighbor_agents_future"]:torch.Size([1, 32, 80, 3]),dtype=torch.float32,device:cuda:0
+            data["static_objects"]:torch.Size([1, 5, 10]),dtype=torch.float32,device:cuda:0
+            data["lanes"]:torch.Size([1, 70, 20, 12]),dtype=torch.float32,device:cuda:0
+            data["lanes_speed_limit"]:torch.Size([1, 70, 1]),dtype=torch.float32,device:cuda:0
+            data["lanes_has_speed_limit"]:torch.Size([1, 70, 1]),dtype=torch.bool,device:cuda:0
+            data["route_lanes"]:torch.Size([1, 25, 20, 12]),dtype=torch.float32,device:cuda:0
+            data["route_lanes_speed_limit"]:torch.Size([1, 25, 1]),dtype=torch.float32,device:cuda:0
+            data["route_lanes_has_speed_limit"]:torch.Size([1, 25, 1]),dtype=torch.bool,device:cuda:0
+            data["ego_current_state"]:torch.Size([1, 10]),dtype=torch.float32,device:cuda:0
+            data["ego_agent_future"]:torch.Size([1, 80, 3]),dtype=torch.float32,device:cuda:0
+            '''
+            
+            # for k,v in data.items():
+            #     print(f"model imput:{k}:{v.shape},dtype={v.dtype},device:{v.device}")
 
-        # for key, val in features.items(): print(f"features_{key}:type:{type(val)}")
-        # for key, val in targets.items(): print(f"targets_{key}:type:{type(val)}")
-        # for item in scenarios: print(f"scenarios type:{type(item)}")
-        
-        # features 中只有一个 feature 作为键的数据，值的类型为该工程定义的class diffusion_planner.features.pluto_feature.DiffusionFeature
-        # targets 中只有一个 trajectory 作为键的数据，值的类型为nuplan.planning.training.preprocessing.features.trajectory.Trajectory
-        # scenarios 为list，中数据类型为 nuplan.planning.scenario_builder.cache.cached_scenario.CachedScenario
-        # print(f"features['feature'].data.type: {type(features['feature'].data)}")
-        # for key,val in features['feature'].data.items(): print(f"features['feature'].data.key {key}: {type(val)}")
-        '''
-        features['feature'].data.key agent: <class 'dict'>
-        features['feature'].data.key map: <class 'dict'>
-        features['feature'].data.key reference_line: <class 'dict'>
-        features['feature'].data.key static_objects: <class 'dict'>
-        features['feature'].data.key data_n_valid_mask: <class 'torch.Tensor'>
-        features['feature'].data.key data_n_type: <class 'torch.Tensor'>
-        features['feature'].data.key current_state: <class 'torch.Tensor'>
-        features['feature'].data.key origin: <class 'torch.Tensor'>
-        features['feature'].data.key angle: <class 'torch.Tensor'>
-        features['feature'].data.key cost_maps: <class 'torch.Tensor'>
-        '''
-        # for key,val in features['feature'].data["agent"].items(): print(f"agent {key}: {val.shape}")
-        """
-        agent position: torch.Size([12, 49, 101, 2]) # 12个batch，49个agent，101个时间步，2个坐标
-        agent heading: torch.Size([12, 49, 101])
-        agent velocity: torch.Size([12, 49, 101, 2])
-        agent shape: torch.Size([12, 49, 101, 2])
-        agent category: torch.Size([12, 49])
-        agent valid_mask: torch.Size([12, 49, 101])
-        agent target: torch.Size([12, 49, 80, 3]) # 就是最后80个时间步的目标位置与朝向
-        """
-        # print(f"features['feature'].data['agent']['position'][0][0][21:]={features['feature'].data['agent']['position'][0][0][21:31]}")
-        # print(f"features['feature'].data['agent']['heading'][0][0][21:]={features['feature'].data['agent']['heading'][0][0][21:31]}")
-        # print(f"features['feature'].data['agent']['target'][0][0][21:]={features['feature'].data['agent']['target'][0][0][:10]}")
-        # for key,val in features['feature'].data["map"].items(): print(f"map {key}: {val.shape}")
-        '''
-        map point_position: torch.Size([12, 144, 3, 20, 2])
-        map point_vector: torch.Size([12, 144, 3, 20, 2])
-        map point_orientation: torch.Size([12, 144, 3, 20])
-        map point_side: torch.Size([12, 144, 3])
-        map polygon_center: torch.Size([12, 144, 3])
-        map polygon_position: torch.Size([12, 144, 2])
-        map polygon_orientation: torch.Size([12, 144])
-        map polygon_type: torch.Size([12, 144])
-        map polygon_on_route: torch.Size([12, 144])
-        map polygon_tl_status: torch.Size([12, 144])
-        map polygon_has_speed_limit: torch.Size([12, 144])
-        map polygon_speed_limit: torch.Size([12, 144])
-        map polygon_road_block_id: torch.Size([12, 144])
-        map valid_mask: torch.Size([12, 144, 20])
-        '''
-        # print(f"targets['trajectory'].data.shape:{targets['trajectory'].data.shape}")
-        # print(f"features['feature'].data['agent']['position'][0][0][21::10]={features['feature'].data['agent']['position'][0][0][21::10]}")
-        # print(f"targets['trajectory'].data[0]:{targets['trajectory'].data[0]}")
-        
-        # print(f"---------------------")
-
-        res = self.forward(features["feature"].data)
-
-        losses = self._compute_objectives(res, features["feature"].data)
-        metrics = self._compute_metrics(res, features["feature"].data, prefix)
-        # 合并 losses（去掉总 loss）进 metrics
-        # extra_metrics = {
-        #     f"{prefix}/{k}": v.detach().float() if isinstance(v, torch.Tensor) else torch.tensor(v, dtype=torch.float32)
-        #     for k, v in losses.items() if k != "loss"
-        # }
-        # metrics.update(extra_metrics)
-        self._log_step(losses["loss"], losses, metrics, prefix)
-
-        return losses["loss"] if self.training else 0.0
-
-    def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        bs, _, T, _ = res["prediction"].shape
-
-        if self.use_contrast_loss:
-            train_num = (bs // 3) * 2 if self.training else bs
-        else:
-            train_num = bs
-
-        trajectory, probability, prediction = (
-            res["trajectory"][:train_num],
-            res["probability"][:train_num],
-            res["prediction"][:train_num],
-        )
-        ref_free_trajectory = res.get("ref_free_trajectory", None)
-        end = -self.OT+T if T < self.OT else None
-        targets_pos = data["agent"]["target"][:train_num, :, -self.OT:end]
-        valid_mask = data["agent"]["valid_mask"][:train_num, :, -self.OT:end]
-        targets_vel = data["agent"]["velocity"][:train_num, :, -self.OT:end]
-        target = torch.cat(
+            inputs = {
+                'ego_current_state': data["ego_current_state"],
+                'neighbor_agents_past': data["neighbor_agents_past"],
+                'lanes': data["lanes"],
+                'lanes_speed_limit': data["lanes_speed_limit"],
+                'lanes_has_speed_limit': data["lanes_has_speed_limit"],
+                'route_lanes': data["route_lanes"],
+                'route_lanes_speed_limit': data["route_lanes_speed_limit"],
+                'route_lanes_has_speed_limit': data["route_lanes_has_speed_limit"],
+                'static_objects': data["static_objects"]
+            }
+            # heading to cos sin
+            
+            
+            ego_future = data["ego_agent_future"]
+            ego_future = torch.cat(
+                [
+                    ego_future[..., :2],
+                    torch.stack(
+                        [ego_future[..., 2].cos(), ego_future[..., 2].sin()], dim=-1
+                    ),
+                ],
+                dim=-1,
+                ) 
+            neighbors_future = data["neighbor_agents_future"] 
+            neighbor_future_mask = torch.sum(torch.ne(neighbors_future[..., :3], 0), dim=-1) == 0
+            neighbors_future = torch.cat(
             [
-                targets_pos[..., :2],
+                neighbors_future[..., :2],
                 torch.stack(
-                    [targets_pos[..., 2].cos(), targets_pos[..., 2].sin()], dim=-1
+                    [neighbors_future[..., 2].cos(), neighbors_future[..., 2].sin()], dim=-1
                 ),
-                targets_vel,
             ],
             dim=-1,
-        )
-
-        # planning loss
-        ego_reg_loss, ego_cls_loss, collision_loss, lane_deviation_loss, smoothness_loss = self.get_planning_loss(
-            data, trajectory, probability, valid_mask[:, 0], target[:, 0], train_num
-        )
-        if ref_free_trajectory is not None:
-            ego_ref_free_reg_loss = F.smooth_l1_loss(
-                ref_free_trajectory[:train_num],
-                target[:, 0, :, : ref_free_trajectory.shape[-1]],
-                reduction="none",
-            ).sum(-1)
-            ego_ref_free_reg_loss = (
-                ego_ref_free_reg_loss * valid_mask[:, 0]
-            ).sum() / valid_mask[:, 0].sum()
-        else:
-            ego_ref_free_reg_loss = ego_reg_loss.new_zeros(1)
-
-        # prediction loss
-        prediction_loss = self.get_prediction_loss(
-            data, prediction, valid_mask[:, 1:], target[:, 1:]
-        ) if 'mvn' not in res.keys() else self.mvn_loss(res, data)
-
-        if self.training and self.use_contrast_loss:
-            contrastive_loss = self._compute_contrastive_loss(
-                res["hidden"], data["data_n_valid_mask"]
             )
-        else:
-            contrastive_loss = prediction_loss.new_zeros(1)
+            neighbors_future[neighbor_future_mask] = 0.
 
-        scope_loss = self.mul_ade(res, data)
+            inputs = self.model.config.observation_normalizer(inputs)
+            losses = {}
+
+            losses, _ = diffusion_loss_func(
+                self.model,
+                inputs,
+                self.model.sde.marginal_prob,
+                (ego_future, neighbors_future, neighbor_future_mask),
+                self.model.config.state_normalizer,
+                losses,
+                self.model.config.diffusion_model_type
+            )
+            losses["loss"]=(
+                losses["ego_planning_loss"]*self.weights[0]
+                + losses["neighbor_prediction_loss"]*self.weights[1]
+            )
+            metrics = {}
+            self._log_step(losses["loss"], losses, metrics, prefix)
+        # ===================================================================
+        #  在验证/测试阶段，只进行前向推理和指标计算
+        # ===================================================================
+        else: # not self.training
+            # 在验证/测试时，我们不需要构造扩散过程的输入，
+            # 直接使用原始的 inputs 字典进行推理即可。
+            inputs = data # 或者您可以根据模型 forward 的需要构建
+            
+            # 直接调用模型进行前向推理
+            # self.model.forward 会调用内部 Decoder 的 forward，
+            # 因为是 eval 模式，会返回 {'prediction': ...}
+            predictions = self.forward(inputs) 
+            
+            # TODO: 在这里计算您的验证指标 (validation metrics)
+            # 例如: ADE, FDE, Collision Rate 等
+            # val_metrics = self._compute_metrics(predictions, targets)
+            # self.log_dict(val_metrics)
+            
+            # 验证步骤通常不返回损失，或者返回一个象征性的0
+            losses = {
+                "loss": 0,
+                "ego_planning_loss": 0,
+                "neighbor_prediction_loss": 0,
+            }
+            metrics = {}
+            self._log_step(losses["loss"], losses, metrics, prefix)
+            return torch.tensor(0.0, device=self.device)
+    
+    def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         
         loss = (
-            ego_reg_loss*self.weights[0] # 回归损失（路径近似程度）
-            + ego_cls_loss*self.weights[1] # 分类损失（体现决策近似程度）
-            + prediction_loss*self.weights[2] #运动预测损失
-            + contrastive_loss # 三元组对比损失,为了学习一个良好的嵌入空间，使得来自同一类别或同一正样本对的向量更相似，而来自不同类别或负样本对的向量更不相似
-            + collision_loss*self.weights[3] # 碰撞风险损失
-            + ego_ref_free_reg_loss*self.weights[4] # 无参考回归损失，使用数据集GT作为参考Target
-            + scope_loss*self.weights[5] # 路径细节损失
-            # + lane_deviation_loss*self.weights[6] # 路径偏离损失
-            + smoothness_loss*self.weights[7] # 路径平滑损失
+            
         )
-        if self.training and self.dynamic_weight:
-            self.losses = [ego_reg_loss, 
-                           ego_cls_loss, 
-                           prediction_loss, 
-                            # contrastive_loss[0], 
-                            collision_loss, 
-                            ego_ref_free_reg_loss, 
-                            scope_loss,
-                            # lane_deviation_loss,
-                            smoothness_loss
-                            ]
-            loss = self.mgda_find_scaler(self.losses)
+        if self.training:
+            self.losses = []
 
         return {
             "loss": loss,
-            "reg_loss": ego_reg_loss.item(),
-            "cls_loss": ego_cls_loss.item(),
-            "prediction_loss": prediction_loss.item(),
-            "contrastive_loss": contrastive_loss.item(),
-            "collision_loss": collision_loss.item(),
-            "ref_free_reg_loss": ego_ref_free_reg_loss.item(),
-            "scope_loss": scope_loss.item(),
-            # "lane_deviation_loss": lane_deviation_loss.item(),
-            "smoothness_loss": smoothness_loss.item(),
-            "alpha_reg_loss": self.weights[0],
-            "alpha_cls_loss": self.weights[1],
-            "alpha_prediction_loss": self.weights[2],
-            # "alpha_contrastive_loss": self.weights[5],
-            "alpha_collision_loss": self.weights[3],
-            "alpha_ref_free_reg_loss": self.weights[4],
-            "alpha_scope_loss": self.weights[5],
-            # "alpha_ref_dev_loss": self.weights[6],
-            "alpha_smooth_loss": self.weights[7]
         }
 
     def get_prediction_loss(self, data, prediction, valid_mask, target):
@@ -537,36 +430,6 @@ class LightningTrainer(pl.LightningModule):
         # 5) 最后 unsqueeze(-1) 得到 (B, T, 1) 返回
         return cost.unsqueeze(-1)  # [B, T, 1]
 
-    def _compute_contrastive_loss(
-        self, hidden, valid_mask, normalize=True, tempreture=0.1
-    ):
-        """
-        Compute triplet loss
-
-        Args:
-            hidden: (3*bs, D)
-        """
-        if normalize:
-            hidden = F.normalize(hidden, dim=1, p=2)
-
-        if not valid_mask.any():
-            return hidden.new_zeros(1)
-
-        x_a, x_p, x_n = hidden.chunk(3, dim=0)
-
-        x_a = x_a[valid_mask]
-        x_p = x_p[valid_mask]
-        x_n = x_n[valid_mask]
-
-        logits_ap = (x_a * x_p).sum(dim=1) / tempreture
-        logits_an = (x_a * x_n).sum(dim=1) / tempreture
-        labels = x_a.new_zeros(x_a.size(0)).long()
-
-        triplet_contrastive_loss = F.cross_entropy(
-            torch.stack([logits_ap, logits_an], dim=1), labels
-        )
-        return triplet_contrastive_loss
-
     def _compute_metrics(self, res, data, prefix) -> Dict[str, torch.Tensor]:
         """
         Computes a set of planning metrics given the model's predictions and targets.
@@ -575,27 +438,8 @@ class LightningTrainer(pl.LightningModule):
         :param targets: ground truth targets
         :return: dictionary of metrics names and values
         """
-        # get top 6 modes
-        trajectory, probability = res["trajectory"], res["probability"]
-        r_padding_mask = ~data["reference_line"]["valid_mask"].any(-1)
-        probability.masked_fill_(r_padding_mask.unsqueeze(-1), -1e6)
-
-        bs, R, M, T, _ = trajectory.shape
-        trajectory = trajectory.reshape(bs, R * M, T, -1)
-        probability = probability.reshape(bs, R * M)
-        top_k_prob, top_k_index = probability.topk(6, dim=-1)
-        top_k_traj = trajectory[torch.arange(bs)[:, None], top_k_index]
-
-        outputs = {
-            "trajectory": top_k_traj[..., :2],
-            "probability": top_k_prob,
-            "prediction": res["prediction"][..., :2],
-            "prediction_target": data["agent"]["target"][:, 1:],
-            "valid_mask": data["agent"]["valid_mask"][:, 1:, self.history_steps :],
-        }
-        target = data["agent"]["target"][:, 0]
-
-        metrics = self.metrics[prefix](outputs, target)
+        
+        metrics = {}
         return metrics
 
     def _log_step(
@@ -697,41 +541,9 @@ class LightningTrainer(pl.LightningModule):
         :return: model's predictions
         """
         # print("features:",features)
+        # print(f"LightingTrainer forward forward forward forward forward")
 
-        data = [
-            features['agent']['position'],  #0
-            features['agent']['heading'],#1
-            features['agent']['velocity'],#2
-            features['agent']['shape'],#3
-            features['agent']['category'],#4
-            features['agent']['valid_mask'],#5
-
-            features['map']['point_position'],#6
-            features['map']['point_vector'],#7
-            features['map']['point_orientation'],#8
-            features['map']['polygon_center'],#9
-            features['map']['polygon_type'],#10
-            features['map']['polygon_on_route'],#11
-            features['map']['polygon_tl_status'],#12
-            features['map']['polygon_has_speed_limit'],#13
-            features['map']['polygon_speed_limit'],#14
-            features['map']['valid_mask'],#15
-
-            features['reference_line']['position'],#16
-            features['reference_line']['vector'],#17
-            features['reference_line']['orientation'],#18
-            features['reference_line']['valid_mask'],#19
-
-            features['static_objects']['position'],#20
-            features['static_objects']['heading'],#21
-            features['static_objects']['shape'],#22
-            features['static_objects']['category'],#23
-            features['static_objects']['valid_mask'],#24
-
-            features['current_state'],#25
-        ]
-        return self.model(data)
-        # return self.model(features)
+        return self.model(features)
 
     def configure_optimizers(
         self,
@@ -779,8 +591,8 @@ class LightningTrainer(pl.LightningModule):
         }
         inter_params = decay & no_decay
         union_params = decay | no_decay
-        assert len(inter_params) == 0
-        assert len(param_dict.keys() - union_params) == 0
+        # assert len(inter_params) == 0
+        # assert len(param_dict.keys() - union_params) == 0
 
         optim_groups = [
             {
@@ -803,14 +615,11 @@ class LightningTrainer(pl.LightningModule):
         )
 
         # Get lr_scheduler
-        scheduler = WarmupCosLR(
+        scheduler = CosineAnnealingWarmUpRestarts(
             optimizer=optimizer,
-            lr=self.lr,
-            min_lr=1e-6,
-            epochs=self.epochs,
-            warmup_epochs=self.warmup_epochs,
+            epoch=self.epochs,
+            warm_up_epoch=self.warmup_epochs,
         )
-
         return [optimizer], [scheduler]
 
     # def on_before_optimizer_step(self, optimizer):
@@ -829,7 +638,8 @@ class LightningTrainer(pl.LightningModule):
             dl = torch.autograd.grad(losses[i], sh_layer.parameters(), retain_graph=True, create_graph=True, allow_unused=True)[0]
             # dl = torch.norm(dl)
             gw.append([dl])
-        sol, min_norm = MinNormSolver.find_min_norm_element(gw)
+        # sol, min_norm = MinNormSolver.find_min_norm_element(gw)
+        sol, min_norm = None,None
         self.weights = sol
         weighted_loss = torch.stack([l*w for l,w in zip(losses, sol)]).sum()
         return weighted_loss
