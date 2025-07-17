@@ -17,13 +17,8 @@ from nuplan.planning.training.data_augmentation.data_augmentation_util import (
 )
 from nuplan.planning.training.modeling.types import FeaturesType, TargetsType
 
-<<<<<<< HEAD
 from diffusion_planner.features.diffusion_feature import DiffusionFeature
 # from diffusion_planner.utils.collision_checker import CollisionChecker
-=======
-from diffusion_planner.features.scope_feature import ScopeFeature
-from diffusion_planner.utils.collision_checker import CollisionChecker
->>>>>>> f29ef7c49132ed13118dce03dcb46abd77b0ea50
 from diffusion_planner.utils.utils import crop_img_from_center
 from diffusion_planner.utils.utils import shift_and_rotate_img
 
@@ -31,11 +26,7 @@ MAP_CONTRAST_TYPE = 0
 AGENT_CONTRAST_TYPE = 1
 
 
-<<<<<<< HEAD
 class DiffusionScenarioGenerator(AbstractAugmentor):
-=======
-class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
->>>>>>> f29ef7c49132ed13118dce03dcb46abd77b0ea50
     def __init__(
         self,
         history_steps=21,
@@ -142,11 +133,7 @@ class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
             for k, v in new_data["agent"].items():
                 new_data["agent"][k] = v[~drop_mask]
 
-<<<<<<< HEAD
         new_data = DiffusionFeature.normalize(new_data).data
-=======
-        new_data = ScopeFeature.normalize(new_data).data
->>>>>>> f29ef7c49132ed13118dce03dcb46abd77b0ea50
 
         return new_data
     
@@ -208,7 +195,6 @@ class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
             np.concatenate([agents_position, agents_heading[..., None]], axis=-1)
         ).unsqueeze(0)
 
-<<<<<<< HEAD
         # collisions = self._collision_checker.collision_check(
         #     ego_state=ego_state,
         #     objects=objects_state,
@@ -217,16 +203,6 @@ class DiffusionContrastiveScenarioGenerator(AbstractAugmentor):
         # )
         # return not collisions.any()
         return False
-=======
-        collisions = self._collision_checker.collision_check(
-            ego_state=ego_state,
-            objects=objects_state,
-            objects_width=torch.from_numpy(agents_shape[:, 0]).unsqueeze(0),
-            objects_length=torch.from_numpy(agents_shape[:, 1]).unsqueeze(0),
-        )
-
-        return not collisions.any()
->>>>>>> f29ef7c49132ed13118dce03dcb46abd77b0ea50
 
     def neg_traffic_light_inversion(self, data):
         new_data = deepcopy(data)
